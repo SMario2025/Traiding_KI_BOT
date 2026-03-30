@@ -1,4 +1,6 @@
 import express from "express"
+import bs58 from "bs58"
+import { Keypair } from "@solana/web3.js"
 import { config } from "./config.js"
 import { getMintMetrics, getMintPriceSeries } from "./live/pumpStream.js"
 import {
@@ -19,6 +21,12 @@ import {
     getLearningHistory,
     getSeenMints,
     getSeenMintStats,
+    createUserProfile,
+    getUserProfiles,
+    getUserProfileById,
+    updateUserProfile,
+    replaceUserWallet,
+    deleteUserProfile,
 } from "./db.js"
 
 const app = express()
@@ -27,6 +35,45 @@ app.use(express.json())
 function fmtPct(value: number) {
     return `${(Number(value || 0) * 100).toFixed(2)}%`
 }
+
+function createFreshWallet() {
+    const kp = Keypair.generate()
+    return {
+        publicKey: kp.publicKey.toBase58(),
+        secretKey: bs58.encode(kp.secretKey),
+    }
+}
+
+function buildUserAiSummary(user: any) {
+    const stats = user?.stats || {}
+    const closed = Number(stats.wins || 0) + Number(stats.losses || 0)
+    const winRate = closed ? Number(stats.wins || 0) / closed : 0
+    const realized = Number(stats.realized_pnl_sol || 0)
+    const style = user?.ai_enabled ? 'AI-CoPilot aktiv' : 'AI-CoPilot deaktiviert'
+    const performance = closed === 0
+        ? 'Noch keine Trades vorhanden – starte mit Paper-Trading und sammle Daten.'
+        : winRate >= 0.55
+            ? 'Dein Profil sieht stabil aus. Du kannst risikobegrenzt weiter skalieren.'
+            : 'Die Trefferquote ist noch schwach. Nutze kleinere Positionsgrößen und strengere Filter.'
+    return {
+        headline: `${style} für ${user.display_name || user.username}`,
+        summary: performance,
+        recommendations: [
+            user?.wallet_public_key ? 'Wallet wurde erfolgreich erstellt und dem Profil zugeordnet.' : 'Erstelle zuerst eine Wallet für den Nutzer.',
+            user?.bio ? 'Profil-Bio vorhanden – gut für Onboarding und CRM.' : 'Füge eine kurze Bio hinzu, damit der Nutzer besser segmentiert werden kann.',
+            closed >= 10 ? 'Genug Daten für erste AI-Auswertung vorhanden.' : 'Für bessere AI-Auswertung sollten mindestens 10 geschlossene Trades erfasst werden.',
+            realized >= 0 ? 'Performance ist aktuell nicht negativ.' : 'Realized PnL ist negativ – Risiko reduzieren.',
+        ],
+        metrics: {
+            trades: Number(stats.trades || 0),
+            wins: Number(stats.wins || 0),
+            losses: Number(stats.losses || 0),
+            realizedPnlSol: realized,
+            winRate,
+        },
+    }
+}
+
 function buildAiFallback(decisions: any[], learning: any, watchRows: any[]) {
     const recent = (decisions || []).slice(0, 40)
     const aiVals = recent
@@ -227,6 +274,61 @@ app.get("/api/feed", (_req, res) => {
     })
 })
 
+app.get("/api/users", (_req, res) => {
+    const users = getUserProfiles(200).map((user: any) => ({
+        ...user,
+        wallet_secret_key: user.wallet_secret_key ? 'HIDDEN' : '',
+    }))
+    res.json({ now: Date.now(), items: users })
+})
+
+app.get("/api/users/:id", (req, res) => {
+    const user = getUserProfileById(String(req.params.id || ''))
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' })
+    return res.json({ ok: true, item: user, ai: buildUserAiSummary(user) })
+})
+
+app.post("/api/users", (req, res) => {
+    const body = req.body || {}
+    const wallet = createFreshWallet()
+    const user = createUserProfile({
+        username: body.username,
+        displayName: body.displayName,
+        email: body.email,
+        bio: body.bio,
+        avatarUrl: body.avatarUrl,
+        aiEnabled: body.aiEnabled !== false,
+        preferences: body.preferences,
+        walletPublicKey: wallet.publicKey,
+        walletSecretKey: wallet.secretKey,
+    })
+    return res.json({ ok: true, item: user, ai: buildUserAiSummary(user) })
+})
+
+app.put("/api/users/:id", (req, res) => {
+    const user = updateUserProfile(String(req.params.id || ''), req.body || {})
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' })
+    return res.json({ ok: true, item: user, ai: buildUserAiSummary(user) })
+})
+
+app.post("/api/users/:id/wallet", (req, res) => {
+    const wallet = createFreshWallet()
+    const user = replaceUserWallet(String(req.params.id || ''), wallet.publicKey, wallet.secretKey)
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' })
+    return res.json({ ok: true, item: user, wallet, ai: buildUserAiSummary(user) })
+})
+
+app.get("/api/users/:id/ai", (req, res) => {
+    const user = getUserProfileById(String(req.params.id || ''))
+    if (!user) return res.status(404).json({ ok: false, error: 'User not found' })
+    return res.json({ ok: true, user, ai: buildUserAiSummary(user) })
+})
+
+app.delete("/api/users/:id", (req, res) => {
+    const ok = deleteUserProfile(String(req.params.id || ''))
+    return res.json({ ok })
+})
+
 function renderMiniPage(title: string, pageId: string) {
     return `<!doctype html>
 <html lang="de">
@@ -244,7 +346,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1
 </head>
 <body>
 <div class="wrap">
-<div class="nav"><a href="/">Dashboard</a><a href="/learning">Learning History</a><a href="/watchlist">Watchlist / Universe</a><a href="/feed">Feed Health</a></div>
+<div class="nav"><a href="/">Dashboard</a><a href="/learning">Learning History</a><a href="/watchlist">Watchlist / Universe</a><a href="/feed">Feed Health</a><a href="/users">Users</a></div>
 <div id="app" class="card"></div>
 </div>
 <script>
@@ -259,6 +361,11 @@ async function run(){
   if('${pageId}'==='watchlist'){
     const r=await fetch('/api/market-universe'); const d=await r.json();
     root.innerHTML='<h2>Marktuniversum</h2><div class="grid"><div class="card"><div class="k">Observed</div><div class="v">'+Number(d.stats?.observed||0)+'</div></div><div class="card"><div class="k">Ready Rate</div><div class="v">'+fmt.pct(d.stats?.readyRate||0)+'</div></div><div class="card"><div class="k">Positive Closes</div><div class="v">'+fmt.pct(d.stats?.positiveCloseRate||0)+'</div></div><div class="card"><div class="k">Follow Through</div><div class="v">'+fmt.pct(d.stats?.followThroughRate||0)+'</div></div></div><table><thead><tr><th>Mint</th><th>Symbol</th><th>Obs</th><th>Move</th><th>Drawdown</th><th>Best Score</th><th>Best AI</th><th>Ready Hits</th><th>Seen</th></tr></thead><tbody>'+((d.items||[]).map(x=>{const move=Number(x.first_price||0)>0&&Number(x.last_price||0)>0?(Number(x.last_price)/Number(x.first_price)-1):0;const dd=Number(x.highest_price||0)>0&&Number(x.last_price||0)>0?(Number(x.last_price)/Number(x.highest_price)-1):0;return '<tr><td class="mono">'+String(x.mint).slice(0,6)+'…'+String(x.mint).slice(-5)+'</td><td>'+x.symbol+'</td><td>'+Number(x.observations||0)+'</td><td class="'+(move>=0?'good':'bad')+'">'+fmt.pct(move)+'</td><td class="'+(dd>=0?'good':'bad')+'">'+fmt.pct(dd)+'</td><td>'+Number(x.best_score||0).toFixed(1)+'</td><td>'+Number(x.best_ai_score||0).toFixed(1)+'</td><td>'+Number(x.ready_hits||0)+'</td><td>'+fmt.ago(x.last_seen_at)+' ago</td></tr>';}).join('')||'<tr><td colspan="9">Noch keine Marktbeobachtungen</td></tr>')+'</tbody></table>';
+    return;
+  }
+  if('${pageId}'==='users'){
+    const r=await fetch('/api/users'); const d=await r.json();
+    root.innerHTML='<h2>User Profiles</h2><p class="muted">Mit integrierter Wallet-Erstellung und AI-Status.</p><table><thead><tr><th>User</th><th>Email</th><th>Wallet</th><th>AI</th><th>Updated</th></tr></thead><tbody>'+((d.items||[]).map(x=>'<tr><td><strong>'+String(x.display_name||x.username)+'</strong><div class="muted">@'+String(x.username||'-')+'</div></td><td>'+(x.email||'-')+'</td><td class="mono">'+(x.wallet_public_key?String(x.wallet_public_key).slice(0,6)+'…'+String(x.wallet_public_key).slice(-6):'-')+'</td><td>'+(x.ai_enabled?'AN':'AUS')+'</td><td>'+new Date(x.updated_at).toLocaleString('de-DE')+'</td></tr>').join('')||'<tr><td colspan="5">Noch keine User angelegt</td></tr>')+'</tbody></table>';
     return;
   }
   if('${pageId}'==='feed'){
@@ -366,7 +473,7 @@ app.get("/", (_req, res) => {
 </head>
 <body>
   <div class="wrap">
-    <div style="display:flex;gap:14px;margin-bottom:14px"><a href="/" style="color:var(--cyan);text-decoration:none">Dashboard</a><a href="/learning" style="color:var(--cyan);text-decoration:none">Learning History</a><a href="/watchlist" style="color:var(--cyan);text-decoration:none">Watchlist / Universe</a><a href="/feed" style="color:var(--cyan);text-decoration:none">Feed Health</a></div><div class="hero">
+    <div style="display:flex;gap:14px;margin-bottom:14px"><a href="/" style="color:var(--cyan);text-decoration:none">Dashboard</a><a href="/learning" style="color:var(--cyan);text-decoration:none">Learning History</a><a href="/watchlist" style="color:var(--cyan);text-decoration:none">Watchlist / Universe</a><a href="/feed" style="color:var(--cyan);text-decoration:none">Feed Health</a><a href="/users" style="color:var(--cyan);text-decoration:none">Users</a></div><div class="hero">
       <div class="title">
         <h1>🚀 Pump Profi Dashboard</h1>
         <p>Live-Monitoring für Feed, Positions, PnL, Health und Execution-Events.</p>
@@ -506,6 +613,27 @@ app.get("/", (_req, res) => {
           </table>
         </div>
       </div>
+
+      <div class="card span-5">
+        <div class="section-head"><h3>User Creator</h3><div class="meta">Wallet + Profil</div></div>
+        <div class="panel-body">
+          <div style="display:grid; gap:10px;">
+            <input id="newDisplayName" placeholder="Display Name" style="padding:12px 14px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:rgba(255,255,255,.03);color:inherit;" />
+            <input id="newUsername" placeholder="username" style="padding:12px 14px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:rgba(255,255,255,.03);color:inherit;" />
+            <input id="newEmail" placeholder="E-Mail" style="padding:12px 14px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:rgba(255,255,255,.03);color:inherit;" />
+            <textarea id="newBio" placeholder="Bio / Notizen" style="min-height:100px;padding:12px 14px;border-radius:14px;border:1px solid rgba(148,163,184,.16);background:rgba(255,255,255,.03);color:inherit;"></textarea>
+            <label class="badge" style="justify-content:space-between; width:100%;"><span>AI aktivieren</span><input id="newAiEnabled" type="checkbox" checked /></label>
+            <button class="badge" id="createUserBtn" style="cursor:pointer;background:rgba(83,224,255,.08);justify-content:center;">User + Wallet erstellen</button>
+            <div class="tiny" id="userActionState">Noch kein User erstellt.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card span-7">
+        <div class="section-head"><h3>User Profiles</h3><div class="meta">AI / Wallet / CRM</div></div>
+        <div class="panel-body"><div id="userProfiles"></div></div>
+      </div>
+
     </div>
 
     <div class="footer">Auto-Refresh alle 4 Sekunden</div>
@@ -862,6 +990,33 @@ document.addEventListener('click', async (e) => {
   if (e.target && e.target.id === 'abortAllBtn') {
     await postJson('/api/control', { abortAll: true });
     load();
+    return;
+  }
+  if (e.target && e.target.id === 'createUserBtn') {
+    const payload = {
+      displayName: document.getElementById('newDisplayName').value,
+      username: document.getElementById('newUsername').value,
+      email: document.getElementById('newEmail').value,
+      bio: document.getElementById('newBio').value,
+      aiEnabled: document.getElementById('newAiEnabled').checked,
+    };
+    const res = await postJson('/api/users', payload);
+    document.getElementById('userActionState').textContent = 'User erstellt: ' + (res.item?.display_name || res.item?.username || '-') + ' • Wallet ' + (res.item?.wallet_public_key || '-');
+    loadUsers();
+    return;
+  }
+  const aiBtn = e.target.closest('[data-user-ai]');
+  if (aiBtn) {
+    const res = await fetch('/api/users/' + aiBtn.getAttribute('data-user-ai') + '/ai');
+    const data = await res.json();
+    document.getElementById('userActionState').textContent = (data.ai?.headline || 'AI') + ' — ' + (data.ai?.summary || '-');
+    return;
+  }
+  const walletBtn = e.target.closest('[data-user-wallet]');
+  if (walletBtn) {
+    const res = await postJson('/api/users/' + walletBtn.getAttribute('data-user-wallet') + '/wallet', {});
+    document.getElementById('userActionState').textContent = 'Neue Wallet: ' + (res.wallet?.publicKey || '-');
+    loadUsers();
   }
 });
 
@@ -908,6 +1063,7 @@ async function load() {
   renderDecisions(data.decisions || []);
   renderTrades(data.trades || []);
   drawChart(data.snapshots || []);
+  loadUsers();
   } catch (err) { console.error(err); }
 }
 

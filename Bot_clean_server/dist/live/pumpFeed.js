@@ -1,6 +1,6 @@
 import WebSocket from "ws";
-import { ingestTradeEvent, upsertWatchedMint, } from "./pumpStream.js";
-import { insertBotEvent, setBotHealth, upsertMintCreator, upsertSeenMintObservation } from "../db.js";
+import { getMintMetrics, ingestTradeEvent, upsertWatchedMint, } from "./pumpStream.js";
+import { getRuntimePositions, getRuntimeWatchlist, insertBotEvent, setBotHealth, upsertMintCreator, upsertRuntimePosition, upsertRuntimeWatchlist, upsertSeenMintObservation } from "../db.js";
 let ws = null;
 let debugLogged = 0;
 const subscribedTradeMints = new Set();
@@ -10,6 +10,7 @@ let reconnectTimer = null;
 let staleCheckTimer = null;
 let heartbeatTimer = null;
 let subscribeFlushTimer = null;
+let runtimeSyncTimer = null;
 let lastMessageAt = 0;
 let reconnectAttempt = 0;
 let intentionalClose = false;
@@ -94,6 +95,50 @@ function subscribeTokenTrades(mint) {
     pendingTradeMints.add(mint);
     scheduleTradeSubscriptionFlush();
 }
+function syncRuntimePrices() {
+    const watchlist = getRuntimeWatchlist(250);
+    for (const item of watchlist) {
+        const metrics = getMintMetrics(item.mint);
+        if (!metrics)
+            continue;
+        upsertRuntimeWatchlist({
+            mint: item.mint,
+            symbol: item.symbol || metrics.symbol || "PUMP",
+            status: item.status,
+            score: Number(item.score || 0),
+            aiScore: Number(item.aiScore || 0),
+            bestScore: Number(item.bestScore || 0),
+            seenCount: Number(item.seenCount || 0),
+            stableSeconds: Number(item.stableSeconds || 0),
+            pullbackFromLocalHighPct: Number(item.pullbackFromLocalHighPct || 0),
+            currentPrice: Number(metrics.currentPrice || item.currentPrice || 0),
+            change5mPct: Number(metrics.change5mPct || item.change5mPct || 0),
+            change15mPct: Number(metrics.change15mPct || item.change15mPct || 0),
+            change1hPct: Number(metrics.change1hPct || item.change1hPct || 0),
+            summary: item.summary,
+            reasons: item.reasons || [],
+            readyToBuy: Boolean(item.readyToBuy),
+            entryLabel: item.entryLabel,
+        });
+    }
+    const positions = getRuntimePositions();
+    for (const pos of positions) {
+        const metrics = getMintMetrics(pos.mint);
+        if (!metrics)
+            continue;
+        upsertRuntimePosition({
+            mint: pos.mint,
+            symbol: pos.symbol || metrics.symbol || "PUMP",
+            entryTime: Number(pos.entry_time || 0),
+            entryPrice: Number(pos.entry_price || 0),
+            highestPriceSeen: Math.max(Number(pos.highest_price_seen || 0), Number(metrics.currentPrice || 0)),
+            sizeSol: Number(pos.size_sol || 0),
+            buyTxid: pos.buy_txid || "",
+            route: pos.route || "pump",
+        });
+    }
+    setBotHealth({ details: { priceSyncAt: Date.now() } });
+}
 function handleEvent(rawMsg) {
     const data = rawMsg?.data ?? rawMsg;
     if (!data || typeof data !== "object")
@@ -158,9 +203,12 @@ function clearFeedTimers() {
         clearInterval(heartbeatTimer);
     if (subscribeFlushTimer)
         clearTimeout(subscribeFlushTimer);
+    if (runtimeSyncTimer)
+        clearInterval(runtimeSyncTimer);
     staleCheckTimer = null;
     heartbeatTimer = null;
     subscribeFlushTimer = null;
+    runtimeSyncTimer = null;
 }
 function nextReconnectDelayMs() {
     reconnectAttempt += 1;
@@ -215,6 +263,9 @@ export function startPumpFeed() {
             }
             catch { }
         }, HEARTBEAT_INTERVAL_MS);
+        runtimeSyncTimer = setInterval(() => {
+            syncRuntimePrices();
+        }, 1000);
         staleCheckTimer = setInterval(() => {
             const ageMs = Date.now() - lastMessageAt;
             const staleSec = Math.floor(ageMs / 1000);

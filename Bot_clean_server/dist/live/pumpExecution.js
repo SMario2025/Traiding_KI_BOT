@@ -3,16 +3,17 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, VersionedTransaction, } from "@s
 import bs58 from "bs58";
 const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
 const BOT_PRIVATE_KEY = process.env.BOT_PRIVATE_KEY || process.env.PRIVATE_KEY;
-if (!BOT_PRIVATE_KEY) {
-    throw new Error("BOT_PRIVATE_KEY fehlt in .env");
-}
+const LIVE_TRADING_ENABLED = String(process.env.LIVE_TRADING_ENABLED || process.env.LIVE_TRADING || "false").toLowerCase() === "true";
 const connection = new Connection(RPC_URL, "confirmed");
-const wallet = Keypair.fromSecretKey(bs58.decode(BOT_PRIVATE_KEY.trim()));
+const wallet = LIVE_TRADING_ENABLED && BOT_PRIVATE_KEY
+    ? Keypair.fromSecretKey(bs58.decode(BOT_PRIVATE_KEY.trim()))
+    : Keypair.generate();
 export async function getPumpWalletPubkey() {
     return LIVE_TRADING_ENABLED ? wallet.publicKey.toBase58() : "LEARNING_ONLY";
 }
 export async function getPumpSolBalance() {
-    if (!LIVE_TRADING_ENABLED) return 0;
+    if (!LIVE_TRADING_ENABLED)
+        return 0;
     const lamports = await connection.getBalance(wallet.publicKey);
     return lamports / LAMPORTS_PER_SOL;
 }

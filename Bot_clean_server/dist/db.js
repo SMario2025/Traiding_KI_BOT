@@ -27,6 +27,7 @@ function defaultStore() {
         wallet_profiles: [],
         seen_mints: [],
         learning_history: [],
+        users: [],
         bot_health: {
             status: 'idle',
             lastLoopAt: 0,
@@ -68,6 +69,7 @@ function normalizeStore(parsed) {
         wallet_profiles: parsed.wallet_profiles || [],
         seen_mints: parsed.seen_mints || [],
         learning_history: parsed.learning_history || [],
+        users: parsed.users || [],
     };
 }
 function tryReadStore(filePath) {
@@ -84,6 +86,10 @@ function tryReadStore(filePath) {
     }
 }
 let store = defaultStore();
+let storeDirty = false;
+let saveTimer = null;
+let lastSaveAt = 0;
+const SAVE_DEBOUNCE_MS = Number(process.env.DB_SAVE_DEBOUNCE_MS || 350);
 function loadStore(fallback = store) {
     const current = tryReadStore(jsonPath);
     if (current)
@@ -95,6 +101,8 @@ function loadStore(fallback = store) {
 }
 store = loadStore(defaultStore());
 function refreshStore() {
+    if (storeDirty)
+        return;
     store = loadStore(store);
 }
 function sleepMs(ms) {
@@ -141,7 +149,7 @@ function replaceFileRobust(tempPath, targetPath) {
     }
     throw lastError instanceof Error ? lastError : new Error('Failed to replace JSON store file');
 }
-function saveStore() {
+function writeStoreToDisk() {
     const payload = JSON.stringify(store, null, 2);
     const tempPath = `${jsonPath}.${process.pid}.tmp`;
     fs.writeFileSync(tempPath, payload, 'utf8');
@@ -150,7 +158,56 @@ function saveStore() {
         fs.writeFileSync(backupPath, payload, 'utf8');
     }
     catch { }
+    storeDirty = false;
+    lastSaveAt = Date.now();
 }
+function saveStore(force = false) {
+    storeDirty = true;
+    const now = Date.now();
+    const age = now - lastSaveAt;
+    if (force || age >= SAVE_DEBOUNCE_MS) {
+        if (saveTimer) {
+            clearTimeout(saveTimer);
+            saveTimer = null;
+        }
+        writeStoreToDisk();
+        return;
+    }
+    if (saveTimer)
+        return;
+    saveTimer = setTimeout(() => {
+        saveTimer = null;
+        if (!storeDirty)
+            return;
+        writeStoreToDisk();
+    }, Math.max(25, SAVE_DEBOUNCE_MS - age));
+}
+process.on('beforeExit', () => {
+    if (!storeDirty)
+        return;
+    try {
+        writeStoreToDisk();
+    }
+    catch { }
+});
+process.on('SIGINT', () => {
+    if (storeDirty) {
+        try {
+            writeStoreToDisk();
+        }
+        catch { }
+    }
+    process.exit(0);
+});
+process.on('SIGTERM', () => {
+    if (storeDirty) {
+        try {
+            writeStoreToDisk();
+        }
+        catch { }
+    }
+    process.exit(0);
+});
 function nextId(key) {
     store.counters[key] = Number(store.counters[key] || 0) + 1;
     return store.counters[key];
@@ -595,4 +652,86 @@ export function consumeAbortAllFlag() {
         saveStore();
     }
     return flag;
+}
+function safeId() {
+    return Math.random().toString(36).slice(2, 10);
+}
+function defaultUserStats() {
+    return { trades: 0, wins: 0, losses: 0, realized_pnl_sol: 0 };
+}
+export function createUserProfile(params) {
+    refreshStore();
+    const now = nowIso();
+    const username = String(params.username || params.displayName || 'user').trim().toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || `user_${safeId()}`;
+    const row = {
+        id: `usr_${safeId()}`,
+        username,
+        display_name: String(params.displayName || username).trim(),
+        email: String(params.email || '').trim(),
+        bio: String(params.bio || '').trim(),
+        avatar_url: String(params.avatarUrl || '').trim(),
+        ai_enabled: params.aiEnabled !== false,
+        wallet_public_key: String(params.walletPublicKey || '').trim(),
+        wallet_secret_key: String(params.walletSecretKey || '').trim(),
+        preferences: (params.preferences && typeof params.preferences === 'object') ? params.preferences : {},
+        stats: defaultUserStats(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.users = store.users.filter(x => x.username !== row.username && (!row.email || x.email !== row.email));
+    store.users.push(row);
+    saveStore(true);
+    return row;
+}
+export function getUserProfiles(limit = 100) {
+    refreshStore();
+    return [...store.users].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, limit);
+}
+export function getUserProfileById(id) {
+    refreshStore();
+    return store.users.find(x => x.id === id);
+}
+export function updateUserProfile(id, patch) {
+    refreshStore();
+    const user = store.users.find(x => x.id === id);
+    if (!user)
+        return null;
+    if (patch.username !== undefined)
+        user.username = String(patch.username || user.username).trim().toLowerCase().replace(/[^a-z0-9_\-]+/g, '_') || user.username;
+    if (patch.displayName !== undefined)
+        user.display_name = String(patch.displayName || '').trim();
+    if (patch.email !== undefined)
+        user.email = String(patch.email || '').trim();
+    if (patch.bio !== undefined)
+        user.bio = String(patch.bio || '').trim();
+    if (patch.avatarUrl !== undefined)
+        user.avatar_url = String(patch.avatarUrl || '').trim();
+    if (patch.aiEnabled !== undefined)
+        user.ai_enabled = Boolean(patch.aiEnabled);
+    if (patch.preferences !== undefined && patch.preferences && typeof patch.preferences === 'object')
+        user.preferences = patch.preferences;
+    if (patch.stats !== undefined && patch.stats)
+        user.stats = { ...defaultUserStats(), ...patch.stats };
+    user.updated_at = nowIso();
+    saveStore(true);
+    return user;
+}
+export function replaceUserWallet(id, walletPublicKey, walletSecretKey) {
+    refreshStore();
+    const user = store.users.find(x => x.id === id);
+    if (!user)
+        return null;
+    user.wallet_public_key = String(walletPublicKey || '').trim();
+    user.wallet_secret_key = String(walletSecretKey || '').trim();
+    user.updated_at = nowIso();
+    saveStore(true);
+    return user;
+}
+export function deleteUserProfile(id) {
+    refreshStore();
+    const before = store.users.length;
+    store.users = store.users.filter(x => x.id !== id);
+    if (store.users.length !== before)
+        saveStore(true);
+    return store.users.length !== before;
 }

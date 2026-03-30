@@ -23,7 +23,7 @@ async function main() {
             setBotHealth({ status: "error" });
         }
         console.log("⏳ Warten auf nächste Runde...");
-        await sleep(4000);
+        await sleep(Number(process.env.BOT_LOOP_MS || 1000));
     }
 }
 main().catch((err) => {

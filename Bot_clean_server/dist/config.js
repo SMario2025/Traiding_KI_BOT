@@ -1,14 +1,16 @@
+import path from "path";
 import dotenv from "dotenv";
 dotenv.config();
 function parsePairs() {
     const raw = process.env.PAIRS || "SOL/USDC";
     return raw.split(",").map(p => p.trim()).filter(Boolean);
 }
+const dataRoot = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || "data";
 export const config = {
     paperMode: process.env.PAPER_MODE === "true",
     liveTrading: process.env.LIVE_TRADING_ENABLED === "true",
     port: Number(process.env.PORT || 3000),
-    dbPath: process.env.DB_PATH || "data/bot.db",
+    dbPath: process.env.DB_PATH || path.join(dataRoot, "bot.db"),
     // ?? MULTI PAIRS
     pairs: parsePairs(),
     // Trading

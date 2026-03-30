@@ -43,3 +43,19 @@ TP_PCT=0.30
 SL_PCT=0.035
 TRAILING_STOP_PCT=0.045
 ```
+
+## Neu eingebaut
+- User-Profile CRUD im Dashboard/Backend
+- automatische Solana-Wallet-Erstellung pro Nutzer
+- Wallet-Neugenerierung per Klick
+- einfache AI-Profilanalyse pro Nutzer
+- neue `/users` Übersicht sowie User-Panel im Hauptdashboard
+
+## Neue API-Endpunkte
+- `GET /api/users`
+- `POST /api/users`
+- `GET /api/users/:id`
+- `PUT /api/users/:id`
+- `POST /api/users/:id/wallet`
+- `GET /api/users/:id/ai`
+- `DELETE /api/users/:id`

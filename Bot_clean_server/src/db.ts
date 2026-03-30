@@ -207,6 +207,27 @@ type LearningHistoryRow = {
   summary: string;
 };
 
+type UserProfileRow = {
+  id: string;
+  username: string;
+  display_name: string;
+  email: string;
+  bio: string;
+  avatar_url: string;
+  ai_enabled: boolean;
+  wallet_public_key: string;
+  wallet_secret_key: string;
+  preferences: Record<string, unknown>;
+  stats: {
+    trades: number;
+    wins: number;
+    losses: number;
+    realized_pnl_sol: number;
+  };
+  created_at: string;
+  updated_at: string;
+};
+
 type Store = {
   counters: Record<string, number>;
   trades: TradeRow[];
@@ -223,6 +244,7 @@ type Store = {
   wallet_profiles: WalletProfileRow[];
   seen_mints: SeenMintRow[];
   learning_history: LearningHistoryRow[];
+  users: UserProfileRow[];
   bot_health: BotHealthRow;
   dashboard_controls: DashboardControlState;
 };
@@ -254,6 +276,7 @@ function defaultStore(): Store {
     wallet_profiles: [],
     seen_mints: [],
     learning_history: [],
+    users: [],
     bot_health: {
       status: 'idle',
       lastLoopAt: 0,
@@ -296,6 +319,7 @@ function normalizeStore(parsed: Partial<Store>): Store {
     wallet_profiles: parsed.wallet_profiles || [],
     seen_mints: (parsed as any).seen_mints || [],
     learning_history: (parsed as any).learning_history || [],
+    users: (parsed as any).users || [],
   };
 }
 
@@ -816,4 +840,84 @@ export function consumeAbortAllFlag() {
   const flag = store.dashboard_controls.abortAll;
   if (flag) { store.dashboard_controls.abortAll = false; store.dashboard_controls.updatedAt = Date.now(); saveStore(); }
   return flag;
+}
+
+
+function safeId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function defaultUserStats() {
+  return { trades: 0, wins: 0, losses: 0, realized_pnl_sol: 0 };
+}
+
+export function createUserProfile(params: { username?: string; displayName?: string; email?: string; bio?: string; avatarUrl?: string; aiEnabled?: boolean; walletPublicKey: string; walletSecretKey: string; preferences?: Record<string, unknown>; }) {
+  refreshStore();
+  const now = nowIso();
+  const username = String(params.username || params.displayName || 'user').trim().toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || `user_${safeId()}`;
+  const row: UserProfileRow = {
+    id: `usr_${safeId()}`,
+    username,
+    display_name: String(params.displayName || username).trim(),
+    email: String(params.email || '').trim(),
+    bio: String(params.bio || '').trim(),
+    avatar_url: String(params.avatarUrl || '').trim(),
+    ai_enabled: params.aiEnabled !== false,
+    wallet_public_key: String(params.walletPublicKey || '').trim(),
+    wallet_secret_key: String(params.walletSecretKey || '').trim(),
+    preferences: (params.preferences && typeof params.preferences === 'object') ? params.preferences : {},
+    stats: defaultUserStats(),
+    created_at: now,
+    updated_at: now,
+  };
+  store.users = store.users.filter(x => x.username !== row.username && (!row.email || x.email !== row.email));
+  store.users.push(row);
+  saveStore(true);
+  return row;
+}
+
+export function getUserProfiles(limit = 100) {
+  refreshStore();
+  return [...store.users].sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, limit);
+}
+
+export function getUserProfileById(id: string) {
+  refreshStore();
+  return store.users.find(x => x.id === id);
+}
+
+export function updateUserProfile(id: string, patch: Partial<{ username: string; displayName: string; email: string; bio: string; avatarUrl: string; aiEnabled: boolean; preferences: Record<string, unknown>; stats: UserProfileRow["stats"]; }>) {
+  refreshStore();
+  const user = store.users.find(x => x.id === id);
+  if (!user) return null;
+  if (patch.username !== undefined) user.username = String(patch.username || user.username).trim().toLowerCase().replace(/[^a-z0-9_\-]+/g, '_') || user.username;
+  if (patch.displayName !== undefined) user.display_name = String(patch.displayName || '').trim();
+  if (patch.email !== undefined) user.email = String(patch.email || '').trim();
+  if (patch.bio !== undefined) user.bio = String(patch.bio || '').trim();
+  if (patch.avatarUrl !== undefined) user.avatar_url = String(patch.avatarUrl || '').trim();
+  if (patch.aiEnabled !== undefined) user.ai_enabled = Boolean(patch.aiEnabled);
+  if (patch.preferences !== undefined && patch.preferences && typeof patch.preferences === 'object') user.preferences = patch.preferences;
+  if (patch.stats !== undefined && patch.stats) user.stats = { ...defaultUserStats(), ...patch.stats };
+  user.updated_at = nowIso();
+  saveStore(true);
+  return user;
+}
+
+export function replaceUserWallet(id: string, walletPublicKey: string, walletSecretKey: string) {
+  refreshStore();
+  const user = store.users.find(x => x.id === id);
+  if (!user) return null;
+  user.wallet_public_key = String(walletPublicKey || '').trim();
+  user.wallet_secret_key = String(walletSecretKey || '').trim();
+  user.updated_at = nowIso();
+  saveStore(true);
+  return user;
+}
+
+export function deleteUserProfile(id: string) {
+  refreshStore();
+  const before = store.users.length;
+  store.users = store.users.filter(x => x.id !== id);
+  if (store.users.length !== before) saveStore(true);
+  return store.users.length !== before;
 }
